@@ -3,23 +3,29 @@
 #include <ESP32Time.h>
 
 #define TINY_GSM_MODEM_SIM800 // Project is using SIM800 GSM modem
-// #define DUMP_AT_COMMANDS          // See all AT commands, if wanted
+// #define DUMP_AT_COMMANDS      // See all AT commands, if wanted
 // #define TINY_GSM_DEBUG Serial // Define the serial console for debug prints, if needed
-#define GSM_PIN "4170"    // set GSM PIN, if any
+// #define TINY_GSM_SSL_CLIENT_AUTHENTICATION
+#define GSM_PIN "9084"    // set GSM PIN, if any
 #define SerialGSM Serial2 // For ESP32 specific setup, see https://quadmeup.com/arduino-esp32-and-3-hardware-serial-ports/
 #include <TinyGsmClient.h>
 
 // GPRS credentials
-const char apn[] = "internet.vodafone.net";
+// const char = "internet.vodafone.net";
+const char apn[] = "internet";
 const char gprsUser[] = "";
 const char gprsPass[] = "";
 
-// MQTT settings
-const char mqtt_broker[] = "broker.hivemq.com";
-const int mqtt_broker_port = 1883;
-const char mqtt_client_id[] = "esp32-sim800l-spike";
-const char mqtt_user[] = "mqtt_user";
-const char mqtt_password[] = "mqtt_password";
+// MQTT setting
+const char mqtt_client_id[] = "sim800l";
+const char mqtt_broker[] = "node93703-efa101.fr-1.paas.massivegrid.net";
+const int mqtt_broker_port = 11027;
+const char mqtt_user[] = "test";
+const char mqtt_password[] = "test";
+// const char mqtt_broker[] = "602d59b7f1b3429daa147124061d1238.s2.eu.hivemq.cloud";
+// const int mqtt_broker_port = 8883;
+// const char mqtt_user[] = "mqtt_test_user";
+// const char mqtt_password[] = "12mqttTestPwd34";
 
 // Open-close reed switch pin
 const int openClosePin = 19;
@@ -45,11 +51,11 @@ struct openclose_event_payload
 #ifdef DUMP_AT_COMMANDS
 #include <StreamDebugger.h>
 StreamDebugger debugger(SerialGSM, Serial);
-TinyGsm modem(debugger);
+TinyGsm gsmModem(debugger);
 #else
-TinyGsm modem(SerialGSM);
+TinyGsm gsmModem(SerialGSM);
 #endif
-TinyGsmClient gsmClient(modem);
+TinyGsmClient gsmClient(gsmModem);
 PubSubClient mqttClient(gsmClient);
 
 /********************************************/
@@ -70,7 +76,7 @@ void connectToMqttBroker()
     count++;
     if (count == 5)
     {
-      Serial.println(" failed");
+      Serial.printf(" failed with state: %d\n", mqttClient.state());
       return;
     }
   }
@@ -80,19 +86,19 @@ void connectToMqttBroker()
 // Connects to GSM network
 bool connectToGsmNetwork()
 {
-  if (!modem.isNetworkConnected())
+  if (!gsmModem.isNetworkConnected())
   {
-    if (GSM_PIN && modem.getSimStatus() != 3)
+    if (GSM_PIN && gsmModem.getSimStatus() != 3)
     {
       Serial.print("Unlocking SIM card...");
-      modem.simUnlock(GSM_PIN);
+      gsmModem.simUnlock(GSM_PIN);
       Serial.println("done");
     }
 
     Serial.print("Waiting for network...");
-    if (!modem.waitForNetwork(1000, true))
+    if (!gsmModem.waitForNetwork(1000, true))
     {
-      Serial.println("failed");
+      Serial.println("network not ready");
 
       return false;
     }
@@ -101,7 +107,7 @@ bool connectToGsmNetwork()
 
   // GPRS connection parameters are usually set after network registration
   Serial.printf("Connecting to %s...", apn);
-  if (!modem.gprsConnect(apn, gprsUser, gprsPass))
+  if (!gsmModem.gprsConnect(apn, gprsUser, gprsPass))
   {
     Serial.println(" failed");
 
@@ -118,17 +124,23 @@ void mqttKeepAliveTaskFunction(void *pvParameters)
   mqttClient.setServer(mqtt_broker, mqtt_broker_port);
   mqttClient.setKeepAlive(90);
 
+  // Reset the GSM modem
+  Serial.print("Resetting GSM modem...");
   digitalWrite(modemResetPin, LOW);
   delay(120);
   digitalWrite(modemResetPin, HIGH);
+  delay(10);
+  Serial.println("done");
 
   Serial.print("Initializing GSM modem...");
-  modem.restart();
+  gsmModem.restart();
   Serial.println("done");
+
+  Serial.printf("GSM Modem info: %s\n", gsmModem.getModemInfo().c_str());
 
   for (;;)
   {
-    if (!modem.isGprsConnected())
+    if (!gsmModem.isGprsConnected())
     {
       bool connResult = connectToGsmNetwork();
       if (connResult == false)
@@ -139,7 +151,7 @@ void mqttKeepAliveTaskFunction(void *pvParameters)
 
     vTaskDelay(xDelay250ms);
 
-    if (modem.isGprsConnected() && !mqttClient.connected())
+    if (gsmModem.isGprsConnected() && !mqttClient.connected())
     {
       connectToMqttBroker();
     }
@@ -168,10 +180,10 @@ void setTimeTaskFunction(void *pvParameters)
 
   for (;;)
   {
-    if (modem.isGprsConnected())
+    if (gsmModem.isGprsConnected())
     {
       Serial.println("Getting time...");
-      if (modem.getNetworkTime(&year, &month, &day, &hours, &minutes, &seconds, NULL))
+      if (gsmModem.getNetworkTime(&year, &month, &day, &hours, &minutes, &seconds, NULL))
       {
         tm gsmTime;
         gsmTime.tm_sec = (seconds);
@@ -204,7 +216,7 @@ void sendHeartbeatTaskFunction(void *pvParameters)
     if (mqttClient.connected() && hasTimeSet())
     {
       String networkDateTime = getTime();
-      int8_t cBatteryPercent = modem.getBattPercent();
+      int8_t cBatteryPercent = gsmModem.getBattPercent();
       size_t bufSize = snprintf(NULL, 0, cHeartbeatMessage, networkDateTime.c_str(), cBatteryPercent);
       char *payload = (char *)malloc(bufSize + 1);
       sprintf(payload, cHeartbeatMessage, networkDateTime.c_str(), cBatteryPercent);
@@ -272,7 +284,8 @@ void setup()
   Serial.println("done");
 
   pinMode(openClosePin, INPUT_PULLUP);
-  pinMode(modemResetPin, INPUT_PULLUP);
+  pinMode(modemResetPin, OUTPUT);
+  digitalWrite(modemResetPin, HIGH);
   attachInterrupt(openClosePin, openCloseStatusChangedHandler, CHANGE);
 
   // Create all tasks on core 1
@@ -284,25 +297,4 @@ void setup()
 /************************************/
 /*           Main loop              */
 /************************************/
-void loop()
-{
-  // if (openCloseStatusChanged)
-  // {
-  //   isOpened = digitalRead(openClosePin) > 0 ? true : false;
-
-  //   String networkTime = modem.getGSMDateTime(DATE_FULL);
-  //   Serial.printf("Time: %s, IP:%s, battery:%d%%, Sensor: %s\n",
-  //                 networkTime.c_str(), modem.getLocalIP().c_str(), modem.getBattPercent(), isOpened ? "opened" : "closed");
-
-  //   size_t bufSize = snprintf(NULL, 0, "{ \"opened\": %s }", isOpened ? "true" : "false");
-  //   char *payload = (char *)malloc(bufSize + 1);
-  //   sprintf(payload, "{ \"opened\": %s }", isOpened ? "true" : "false");
-
-  //   mqttClient.publish("testtopic/openCloseStatus", payload);
-
-  //   openCloseStatusChanged = false;
-  //   free(payload);
-  // }
-
-  // vTaskDelay(xDelay250ms);
-}
+void loop() {}
